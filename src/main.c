@@ -15,6 +15,7 @@
 
 #define PORT_PAR_DEFAUT    8080
 #define DOSSIER_PAR_DEFAUT "site"
+#define DELAI_PAR_DEFAUT   5
 
 /**
  * Rôle : affiche le mode d'emploi du programme.
@@ -23,11 +24,29 @@
  */
 static void afficher_aide(const char *programme)
 {
-    printf("Utilisation : %s [-p port] [-d dossier] [-m threads|fork|simple]\n"
+    printf("Utilisation : %s [-p port] [-d dossier] [-m threads|fork|simple] [-t secondes]\n"
            "  -p  port d'écoute (défaut : %d)\n"
            "  -d  dossier à servir (défaut : %s)\n"
-           "  -m  un thread par visiteur, un processus, ou un visiteur à la fois (défaut : threads)\n",
-           programme, PORT_PAR_DEFAUT, DOSSIER_PAR_DEFAUT);
+           "  -m  un thread par visiteur, un processus, ou un visiteur à la fois (défaut : threads)\n"
+           "  -t  attente maximale d'un client, en secondes (défaut : %d)\n",
+           programme, PORT_PAR_DEFAUT, DOSSIER_PAR_DEFAUT, DELAI_PAR_DEFAUT);
+}
+
+/**
+ * Rôle : convertit un texte en entier compris entre min et max.
+ * Paramètres :
+ *   - texte : le texte à convertir
+ *   - min, max : bornes autorisées
+ * Retour : l'entier, ou -1 si le texte n'est pas un nombre valide.
+ */
+static int lire_entier(const char *texte, int min, int max)
+{
+    char *fin;
+    long valeur = strtol(texte, &fin, 10);
+
+    if (fin == texte || *fin != '\0' || valeur < min || valeur > max)
+        return -1;
+    return (int)valeur;
 }
 
 /**
@@ -66,30 +85,33 @@ static const char *nom_mode(TMode mode)
 }
 
 /**
- * Rôle : convertit un texte en entier compris entre min et max.
+ * Rôle : associe une fonction à un signal, par exemple Ctrl+C (SIGINT).
+ * But : sans l'option SA_RESTART, un accept en attente est interrompu par le
+ *       signal, ce qui laisse la boucle du serveur voir la demande d'arrêt.
  * Paramètres :
- *   - texte : le texte à convertir
- *   - min, max : bornes autorisées
- * Retour : l'entier, ou -1 si le texte n'est pas un nombre valide.
+ *   - numero : le signal
+ *   - action : la fonction à appeler
  */
-static int lire_entier(const char *texte, int min, int max)
+static void installer_signal(int numero, void (*action)(int))
 {
-    char *fin;
-    long valeur = strtol(texte, &fin, 10);
+    struct sigaction reglage;
 
-    if (fin == texte || *fin != '\0' || valeur < min || valeur > max)
-        return -1;
-    return (int)valeur;
+    memset(&reglage, 0, sizeof reglage);
+    reglage.sa_handler = action;
+    sigemptyset(&reglage.sa_mask);
+    reglage.sa_flags = 0;
+    sigaction(numero, &reglage, NULL);
 }
 
 int main(int argc, char *argv[])
 {
     int port = PORT_PAR_DEFAUT;
+    int delai = DELAI_PAR_DEFAUT;
     const char *dossier = DOSSIER_PAR_DEFAUT;
     TMode mode = MODE_THREADS;
     int option;
 
-    while ((option = getopt(argc, argv, "p:d:m:h")) != -1) {
+    while ((option = getopt(argc, argv, "p:d:m:t:h")) != -1) {
         switch (option) {
         case 'p':
             port = lire_entier(optarg, 1, 65535);
@@ -107,6 +129,13 @@ int main(int argc, char *argv[])
                 return EXIT_FAILURE;
             }
             break;
+        case 't':
+            delai = lire_entier(optarg, 1, 3600);
+            if (delai < 0) {
+                fprintf(stderr, "Délai invalide : %s\n", optarg);
+                return EXIT_FAILURE;
+            }
+            break;
         case 'h':
             afficher_aide(argv[0]);
             return EXIT_SUCCESS;
@@ -116,13 +145,18 @@ int main(int argc, char *argv[])
         }
     }
 
-    /* Le dossier servi, en chemin absolu */
+    /* Le dossier servi, en chemin absolu et sans lien symbolique :
+       c'est la référence des contrôles de sécurité */
     char racine[PATH_MAX];
     struct stat infos;
     if (realpath(dossier, racine) == NULL || stat(racine, &infos) < 0 || !S_ISDIR(infos.st_mode)) {
         fprintf(stderr, "Dossier introuvable : %s\n", dossier);
         return EXIT_FAILURE;
     }
+
+    /* Ctrl+C ou kill : arrêt propre */
+    installer_signal(SIGINT, arreter_serveur);
+    installer_signal(SIGTERM, arreter_serveur);
 
     /* Écrire vers un client déjà parti ne doit pas arrêter le programme */
     signal(SIGPIPE, SIG_IGN);
@@ -136,8 +170,12 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
 
     printf("Serveur prêt sur http://localhost:%d (dossier %s, mode %s)\n", port, racine, nom_mode(mode));
+    printf("Ctrl+C pour l'arrêter.\n");
     fflush(stdout);
 
-    lancer_serveur(ecoute, racine, mode);
+    lancer_serveur(ecoute, racine, mode, delai);
+
+    close(ecoute);
+    printf("\nServeur arrêté.\n");
     return EXIT_SUCCESS;
 }

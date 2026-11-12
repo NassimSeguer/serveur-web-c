@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
@@ -92,27 +93,64 @@ int decoder_url(const char *source, char *destination, size_t taille)
 }
 
 /**
- * Rôle : cherche un segment « .. » dans le chemin, comme dans /../../etc/passwd.
- * But : empêcher un visiteur de remonter au-dessus du dossier servi.
+ * Rôle : cherche un élément du chemin qui commence par un point : « .. », « .git », « .env »...
+ * But : empêcher de remonter au-dessus du dossier servi et de lire les fichiers cachés.
  * Paramètres :
  *   - chemin : le chemin décodé
- * Retour : 1 si le chemin contient « .. », 0 sinon.
+ * Retour : 1 si un tel élément existe, 0 sinon.
  */
-static int contient_remontee(const char *chemin)
+static int contient_element_cache(const char *chemin)
 {
     const char *debut = chemin;
 
     while (*debut != '\0') {
         while (*debut == '/')
             debut++;
-        const char *fin = debut;
-        while (*fin != '\0' && *fin != '/')
-            fin++;
-        if (fin - debut == 2 && debut[0] == '.' && debut[1] == '.')
+        if (*debut == '.')
             return 1;
-        debut = fin;
+        while (*debut != '\0' && *debut != '/')
+            debut++;
     }
     return 0;
+}
+
+/**
+ * Rôle : vérifie qu'un chemin absolu se trouve dans le dossier servi.
+ * Paramètres :
+ *   - chemin : chemin absolu, sans lien symbolique
+ *   - racine : chemin absolu du dossier servi
+ * Retour : 1 si chemin est la racine ou se trouve dedans, 0 sinon.
+ */
+static int est_dans_racine(const char *chemin, const char *racine)
+{
+    size_t longueur = strlen(racine);
+
+    if (strcmp(racine, "/") == 0)
+        return 1;
+    return strncmp(chemin, racine, longueur) == 0
+        && (chemin[longueur] == '/' || chemin[longueur] == '\0');
+}
+
+/**
+ * Rôle : trouve le fichier réel qui correspond au chemin demandé.
+ * But : realpath suit les liens symboliques ; on vérifie ensuite que la cible
+ *       reste dans le dossier servi, sinon un lien pourrait mener n'importe où.
+ * Paramètres :
+ *   - racine : chemin absolu du dossier servi
+ *   - chemin : chemin décodé, commençant par '/'
+ *   - reel : reçoit le chemin réel (tableau de PATH_MAX octets)
+ * Retour : 0 si le fichier existe dans la racine, 403 s'il en sort, 404 s'il n'existe pas.
+ */
+static int resoudre(const char *racine, const char *chemin, char *reel)
+{
+    char demande[PATH_MAX];
+    int longueur = snprintf(demande, sizeof demande, "%s%s", racine, chemin);
+
+    if (longueur < 0 || (size_t)longueur >= sizeof demande)
+        return 404;
+    if (realpath(demande, reel) == NULL)
+        return errno == EACCES ? 403 : 404;
+    return est_dans_racine(reel, racine) ? 0 : 403;
 }
 
 /**
@@ -193,7 +231,7 @@ int servir_fichier(int client, const char *racine, const TRequete *requete, long
 {
     int avec_corps = strcmp(requete->methode, "HEAD") != 0;
     char chemin[TAILLE_CHEMIN];
-    char complet[PATH_MAX];
+    char reel[PATH_MAX];
     struct stat infos;
 
     *octets = 0;
@@ -202,24 +240,28 @@ int servir_fichier(int client, const char *racine, const TRequete *requete, long
     if (decoder_url(requete->chemin, chemin, sizeof chemin) < 0)
         return repondre(client, 400, avec_corps, NULL);
 
-    /* 2. Refuser toute remontée au-dessus du dossier servi */
-    if (contient_remontee(chemin))
+    /* 2. Refuser les remontées « .. » et les fichiers cachés */
+    if (contient_element_cache(chemin))
         return repondre(client, 403, avec_corps, NULL);
 
-    /* 3. Construire le chemin du fichier sur le disque */
-    int longueur = snprintf(complet, sizeof complet, "%s%s", racine, chemin);
-    if (longueur < 0 || (size_t)longueur >= sizeof complet)
-        return repondre(client, 404, avec_corps, NULL);
+    /* 3. Trouver le fichier réel et vérifier qu'il reste dans le dossier servi */
+    int code = resoudre(racine, chemin, reel);
+    if (code != 0)
+        return repondre(client, code, avec_corps, NULL);
 
     /* 4. Un dossier : rediriger vers « dossier/ », puis servir son index.html */
-    if (stat(complet, &infos) == 0 && S_ISDIR(infos.st_mode)) {
-        if (chemin[strlen(chemin) - 1] != '/')
+    if (stat(reel, &infos) == 0 && S_ISDIR(infos.st_mode)) {
+        size_t longueur = strlen(chemin);
+        if (chemin[longueur - 1] != '/')
             return rediriger_dossier(client, requete, avec_corps);
-        if ((size_t)longueur + strlen("index.html") >= sizeof complet)
+        if (longueur + strlen("index.html") >= sizeof chemin)
             return repondre(client, 404, avec_corps, NULL);
-        strcat(complet, "index.html");
+        strcat(chemin, "index.html");
+        code = resoudre(racine, chemin, reel);
+        if (code != 0)
+            return repondre(client, code, avec_corps, NULL);
     }
 
     /* 5. Ouvrir le fichier et l'envoyer */
-    return envoyer_fichier(client, complet, avec_corps, octets);
+    return envoyer_fichier(client, reel, avec_corps, octets);
 }

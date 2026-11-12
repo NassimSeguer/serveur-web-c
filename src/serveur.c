@@ -1,13 +1,17 @@
 #include "serveur.h"
+#include "http.h"
 #include "traitement.h"
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 /* Ce qu'il faut pour servir une connexion, transmis au thread ou au processus */
@@ -16,6 +20,16 @@ typedef struct {
     char ip[INET_ADDRSTRLEN];
     const char *racine;
 } TConnexion;
+
+/* Passe à 1 quand Ctrl+C est pressé. « volatile sig_atomic_t » est le seul
+   type qu'un gestionnaire de signal peut modifier sans risque. */
+static volatile sig_atomic_t arret_demande = 0;
+
+void arreter_serveur(int numero)
+{
+    (void)numero;
+    arret_demande = 1;
+}
 
 int creer_socket_ecoute(int port)
 {
@@ -51,14 +65,29 @@ int creer_socket_ecoute(int port)
 }
 
 /**
- * Rôle : sert une connexion, puis la ferme.
+ * Rôle : fixe une attente maximale pour les lectures et les écritures sur une connexion.
+ * But : un client muet ou très lent ne doit pas occuper le serveur indéfiniment.
+ * Paramètres :
+ *   - client : descripteur de la connexion
+ *   - secondes : attente maximale
+ */
+static void limiter_attente(int client, int secondes)
+{
+    struct timeval delai = { .tv_sec = secondes, .tv_usec = 0 };
+
+    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &delai, sizeof delai);
+    setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &delai, sizeof delai);
+}
+
+/**
+ * Rôle : sert une connexion, puis la ferme proprement.
  * Paramètres :
  *   - connexion : la connexion à servir
  */
 static void servir_connexion(const TConnexion *connexion)
 {
     traiter_client(connexion->client, connexion->racine, connexion->ip);
-    close(connexion->client);
+    fermer_connexion(connexion->client);
 }
 
 /**
@@ -92,8 +121,19 @@ static void lancer_thread(const TConnexion *modele)
     }
     *connexion = *modele;
 
+    /* Ctrl+C doit arriver au fil principal, qui attend dans accept. Le nouveau
+       thread hérite du masque de signaux : on bloque SIGINT et SIGTERM le temps
+       de le créer, puis on rétablit le masque du fil principal. */
+    sigset_t arret, ancien;
+    sigemptyset(&arret);
+    sigaddset(&arret, SIGINT);
+    sigaddset(&arret, SIGTERM);
+    pthread_sigmask(SIG_BLOCK, &arret, &ancien);
+
     pthread_t thread;
     int erreur = pthread_create(&thread, NULL, thread_client, connexion);
+    pthread_sigmask(SIG_SETMASK, &ancien, NULL);
+
     if (erreur != 0) {
         fprintf(stderr, "pthread_create : %s\n", strerror(erreur));
         close(connexion->client);
@@ -132,16 +172,20 @@ static void lancer_processus(int ecoute, const TConnexion *connexion)
     close(connexion->client);
 }
 
-void lancer_serveur(int ecoute, const char *racine, TMode mode)
+void lancer_serveur(int ecoute, const char *racine, TMode mode, int delai)
 {
-    for (;;) {
+    while (!arret_demande) {
         struct sockaddr_in adresse;
         socklen_t longueur = sizeof adresse;
         int client = accept(ecoute, (struct sockaddr *)&adresse, &longueur);
         if (client < 0) {
-            perror("accept");
+            /* EINTR : accept a été interrompu par un signal, sans doute Ctrl+C */
+            if (errno != EINTR)
+                perror("accept");
             continue;
         }
+
+        limiter_attente(client, delai);
 
         TConnexion connexion = { .client = client, .racine = racine };
         inet_ntop(AF_INET, &adresse.sin_addr, connexion.ip, sizeof connexion.ip);

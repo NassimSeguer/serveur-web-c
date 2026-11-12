@@ -1,8 +1,8 @@
 #include "traitement.h"
 #include "fichiers.h"
 #include "http.h"
+#include "journal.h"
 
-#include <stdio.h>
 #include <string.h>
 
 int traiter_client(int client, const char *racine, const char *ip)
@@ -13,10 +13,13 @@ int traiter_client(int client, const char *racine, const char *ip)
     int code;
 
     int lus = lire_requete(client, tampon, sizeof tampon);
-    if (lus == LECTURE_FERMEE || lus == LECTURE_DELAI)
-        return 0;
+    if (lus == LECTURE_FERMEE)
+        return 0;                       /* parti sans rien demander */
 
-    if (lus == LECTURE_TROP_LONGUE) {
+    if (lus == LECTURE_DELAI) {
+        code = 408;                     /* trop lent : on ne l'attend plus */
+        envoyer_erreur(client, code, 1, NULL);
+    } else if (lus == LECTURE_TROP_LONGUE) {
         code = 431;
         envoyer_erreur(client, code, 1, NULL);
     } else if (analyser_requete(tampon, &requete) < 0) {
@@ -29,7 +32,6 @@ int traiter_client(int client, const char *racine, const char *ip)
         code = servir_fichier(client, racine, &requete, &octets);
     }
 
-    printf("%s  %s %s  %d  %lld o\n", ip, requete.methode, requete.chemin, code, octets);
-    fflush(stdout);
+    journaliser(ip, requete.methode, requete.chemin, code, octets);
     return code;
 }

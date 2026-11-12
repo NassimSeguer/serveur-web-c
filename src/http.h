@@ -88,4 +88,14 @@ int envoyer_entetes(int client, int code, const char *type, long long taille, co
  */
 int envoyer_erreur(int client, int code, int avec_corps, const char *autres);
 
+/**
+ * Rôle : ferme une connexion sans faire perdre la réponse au client.
+ * But : si le client a encore des données en route, une fermeture brutale peut
+ *       effacer la réponse avant qu'il la lise. On annonce la fin de l'envoi,
+ *       on lit ce qui reste pendant au plus une seconde, puis on ferme.
+ * Paramètres :
+ *   - client : descripteur de la connexion
+ */
+void fermer_connexion(int client);
+
 #endif

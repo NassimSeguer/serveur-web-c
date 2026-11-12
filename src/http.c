@@ -4,7 +4,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <time.h>
+#include <unistd.h>
 
 int lire_requete(int client, char *tampon, size_t taille)
 {
@@ -137,4 +139,22 @@ int envoyer_erreur(int client, int code, int avec_corps, const char *autres)
     if (envoyer_entetes(client, code, "text/html; charset=utf-8", longueur, autres) < 0)
         return -1;
     return avec_corps ? envoyer_tout(client, page, (size_t)longueur) : 0;
+}
+
+void fermer_connexion(int client)
+{
+    /* Plus rien à envoyer : le client reçoit la fin de la réponse */
+    shutdown(client, SHUT_WR);
+
+    /* Lire ce que le client envoie encore, une seconde au plus et 64 Ko au maximum */
+    struct timeval une_seconde = { .tv_sec = 1, .tv_usec = 0 };
+    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &une_seconde, sizeof une_seconde);
+
+    char poubelle[4096];
+    size_t total = 0;
+    ssize_t lus;
+    while (total < 65536 && (lus = recv(client, poubelle, sizeof poubelle, 0)) > 0)
+        total += (size_t)lus;
+
+    close(client);
 }
