@@ -1,3 +1,4 @@
-# Exécutable produit par make
+# Exécutables produits par make
 serveur
+serveur-verif
 *.o
