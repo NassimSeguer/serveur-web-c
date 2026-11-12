@@ -5,6 +5,13 @@
  *  Module serveur : la prise d'écoute et l'accueil des visiteurs.
  * ========================================================================= */
 
+/* Façon de servir plusieurs visiteurs */
+typedef enum {
+    MODE_SIMPLE,    /* un visiteur à la fois */
+    MODE_FORK,      /* un processus par visiteur */
+    MODE_THREADS    /* un thread par visiteur */
+} TMode;
+
 /**
  * Rôle : crée la prise d'écoute TCP sur le port demandé.
  * But : socket, bind et listen réunis en un appel.
@@ -15,11 +22,13 @@
 int creer_socket_ecoute(int port);
 
 /**
- * Rôle : accepte les visiteurs un par un et répond à chacun.
+ * Rôle : accepte les visiteurs et confie chacun à un thread, à un processus,
+ *        ou le sert directement en mode simple.
  * Paramètres :
  *   - ecoute : la prise créée par creer_socket_ecoute
  *   - racine : chemin absolu du dossier servi
+ *   - mode : MODE_SIMPLE, MODE_FORK ou MODE_THREADS
  */
-void lancer_serveur(int ecoute, const char *racine);
+void lancer_serveur(int ecoute, const char *racine, TMode mode);
 
 #endif
