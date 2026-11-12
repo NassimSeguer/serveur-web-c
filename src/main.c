@@ -1,78 +1,95 @@
 /*
- * serveur-web-c, étape 1 : répondre « Bonjour » à un navigateur.
- *
- * Le programme ouvre une prise réseau TCP sur le port 8080, attend les
- * connexions une par une et renvoie toujours la même réponse.
+ * serveur-web-c : un serveur HTTP écrit en C avec les sockets POSIX.
+ * Point d'entrée : lit les options, prépare le dossier servi et lance le serveur.
  */
 
+#include "serveur.h"
+
+#include <limits.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
 
-#define PORT 8080
+#define PORT_PAR_DEFAUT    8080
+#define DOSSIER_PAR_DEFAUT "site"
 
-int main(void)
+/**
+ * Rôle : affiche le mode d'emploi du programme.
+ * Paramètres :
+ *   - programme : nom du programme, tel que lancé
+ */
+static void afficher_aide(const char *programme)
 {
-    /* 1. Créer une prise TCP (SOCK_STREAM) en IPv4 (AF_INET) */
-    int ecoute = socket(AF_INET, SOCK_STREAM, 0);
-    if (ecoute < 0) {
-        perror("socket");
-        return EXIT_FAILURE;
-    }
+    printf("Utilisation : %s [-p port] [-d dossier]\n"
+           "  -p  port d'écoute (défaut : %d)\n"
+           "  -d  dossier à servir (défaut : %s)\n",
+           programme, PORT_PAR_DEFAUT, DOSSIER_PAR_DEFAUT);
+}
 
-    /* 2. Pouvoir relancer le serveur aussitôt après l'avoir arrêté */
-    int oui = 1;
-    if (setsockopt(ecoute, SOL_SOCKET, SO_REUSEADDR, &oui, sizeof oui) < 0) {
-        perror("setsockopt");
-        return EXIT_FAILURE;
-    }
+/**
+ * Rôle : convertit un texte en entier compris entre min et max.
+ * Paramètres :
+ *   - texte : le texte à convertir
+ *   - min, max : bornes autorisées
+ * Retour : l'entier, ou -1 si le texte n'est pas un nombre valide.
+ */
+static int lire_entier(const char *texte, int min, int max)
+{
+    char *fin;
+    long valeur = strtol(texte, &fin, 10);
 
-    /* 3. Attacher la prise au port 8080, sur toutes les adresses de la machine */
-    struct sockaddr_in adresse = {0};
-    adresse.sin_family = AF_INET;
-    adresse.sin_port = htons(PORT);              /* octet de poids fort en premier */
-    adresse.sin_addr.s_addr = htonl(INADDR_ANY);
-    if (bind(ecoute, (struct sockaddr *)&adresse, sizeof adresse) < 0) {
-        perror("bind");
-        return EXIT_FAILURE;
-    }
+    if (fin == texte || *fin != '\0' || valeur < min || valeur > max)
+        return -1;
+    return (int)valeur;
+}
 
-    /* 4. Se mettre en écoute, avec une file d'attente de 10 connexions */
-    if (listen(ecoute, 10) < 0) {
-        perror("listen");
-        return EXIT_FAILURE;
-    }
-    printf("Serveur prêt sur http://localhost:%d\n", PORT);
+int main(int argc, char *argv[])
+{
+    int port = PORT_PAR_DEFAUT;
+    const char *dossier = DOSSIER_PAR_DEFAUT;
+    int option;
 
-    /* La réponse HTTP : ligne de statut, en-têtes, ligne vide, puis le contenu */
-    const char *reponse =
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/plain; charset=utf-8\r\n"
-        "Content-Length: 8\r\n"
-        "Connection: close\r\n"
-        "\r\n"
-        "Bonjour\n";
-
-    /* 5. Servir les visiteurs les uns après les autres, sans fin */
-    for (;;) {
-        int client = accept(ecoute, NULL, NULL);
-        if (client < 0) {
-            perror("accept");
-            continue;
+    while ((option = getopt(argc, argv, "p:d:h")) != -1) {
+        switch (option) {
+        case 'p':
+            port = lire_entier(optarg, 1, 65535);
+            if (port < 0) {
+                fprintf(stderr, "Port invalide : %s\n", optarg);
+                return EXIT_FAILURE;
+            }
+            break;
+        case 'd':
+            dossier = optarg;
+            break;
+        case 'h':
+            afficher_aide(argv[0]);
+            return EXIT_SUCCESS;
+        default:
+            afficher_aide(argv[0]);
+            return EXIT_FAILURE;
         }
-
-        char tampon[4096];
-        ssize_t lus = read(client, tampon, sizeof tampon - 1);
-        if (lus > 0) {
-            tampon[lus] = '\0';
-            printf("--- Requête reçue ---\n%s", tampon);
-        }
-
-        if (write(client, reponse, strlen(reponse)) < 0)
-            perror("write");
-        close(client);
     }
+
+    /* Le dossier servi, en chemin absolu */
+    char racine[PATH_MAX];
+    struct stat infos;
+    if (realpath(dossier, racine) == NULL || stat(racine, &infos) < 0 || !S_ISDIR(infos.st_mode)) {
+        fprintf(stderr, "Dossier introuvable : %s\n", dossier);
+        return EXIT_FAILURE;
+    }
+
+    /* Écrire vers un client déjà parti ne doit pas arrêter le programme */
+    signal(SIGPIPE, SIG_IGN);
+
+    int ecoute = creer_socket_ecoute(port);
+    if (ecoute < 0)
+        return EXIT_FAILURE;
+
+    printf("Serveur prêt sur http://localhost:%d (dossier %s)\n", port, racine);
+    fflush(stdout);
+
+    lancer_serveur(ecoute, racine);
+    return EXIT_SUCCESS;
 }

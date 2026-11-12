@@ -7,7 +7,7 @@
 ## Étapes
 
 - [x] 1. Répondre « Bonjour » à un navigateur
-- [ ] 2. Envoyer les fichiers d'un dossier, avec le bon type et une page 404
+- [x] 2. Envoyer les fichiers d'un dossier, avec le bon type et une page 404
 - [ ] 3. Servir plusieurs visiteurs à la fois (`fork`, puis threads)
 - [ ] 4. Bloquer les chemins dangereux, journaliser les requêtes, ajouter des tests
 
